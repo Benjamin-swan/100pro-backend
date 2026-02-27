@@ -21,6 +21,7 @@
 | 14 | PRO-B-45 | 이메일/소셜 계정 충돌 병합 처리 및 임시 검증 |
 | 15 | PRO-B-46 | 프론트엔드-백엔드 Task API 통합 및 게스트 모드 구현 |
 | 16 | PRO-B-47 | 5늘할일 캘린더 기능 및 과거 데이터 연동 API |
+| 17 | PRO-B-48 | 계정별 데이터 분리 및 백엔드 완전 연동 (PRO-B-46 재구현) |
 
 
 ---
@@ -302,9 +303,9 @@
 - [x] 기존 `seedTodos` 백엔드 DB 스크립트 마이그레이션
 
 > **현재 진행 및 구현 여부 가이드**
-> - **작업 시작 유무**: 완료됨
-> - **구현 유무**: **프론트엔드/백엔드 Full Stack으로 기능 구현 및 마이그레이션 완료**
-> - **사유**: 프론트엔드의 `todoStore`에 있던 더미 데이터를 걷어내고, 백엔드 Auth와 연계하여 완전한 SaaS 형태의 데이터 플로우를 완성했습니다. 게스트 상태에서 작성한 Todo 데이터는 `authStore` 호출 시 트리거되는 `migrateAndFetch` 비동기 동작을 통해 즉시 마이그레이션되며, Timezone 버그와 UI StrictMode 버그까지 모두 해결되었습니다.
+> - **작업 시작 유무**: 완료됨 (단, 실제 구현은 PRO-B-48에서 완료)
+> - **구현 유무**: **⚠️ 문서상 완료 표기 오류 — 실제 미구현이었음. `[PRO-B-48]`에서 재구현 완료**
+> - **사유**: 이 티켓에서 작성된 `todoStore.ts`에 `migrateAndFetch` / `clearStore` 함수가 실제로 존재하지 않았고, `seedTodos`가 제거되지 않아 모든 사용자에게 동일한 데이터가 표시되는 상태였습니다. `authStore`에서 두 함수를 호출하지만 실제 함수가 없어 아무 동작도 하지 않았습니다. `[PRO-B-48]`에서 전면 재구현하였습니다.
 
 ---
 
@@ -326,6 +327,76 @@
 > - **작업 시작 유무**: 완료됨
 > - **구현 유무**: **백엔드 CRUD 단 및 캘린더 UI 연동 완료**
 > - **사유**: `SchedulePage`에서 필요한 모든 Task 조회 및 상태 조작이 완성된 백엔드 Task 라우터 엔드포인트와 완전히 맞물려 동작합니다. 게스트 접근 제어는 프론트엔드 라우트단 및 백엔드 401 차단으로 이중 설계되어 적용을 마쳤습니다.
+
+---
+
+## [PRO-B-48] 계정별 데이터 분리 및 백엔드 완전 연동 (PRO-B-46 재구현)
+
+### 배경 (Background)
+
+`[PRO-B-46]`이 문서상으로는 "완료"로 기록되어 있었으나, 실제 코드를 검토한 결과 핵심 기능이 미구현 상태임이 확인되었습니다:
+
+1. **`migrateAndFetch` / `clearStore` 함수 미존재**: `authStore.ts`가 두 함수를 호출하지만 `todoStore.ts`에 실제 구현이 없어 로그인 시 백엔드 데이터를 불러오지 못하고 로그아웃 시 데이터가 지워지지 않았습니다.
+2. **`seedTodos` 하드코딩**: 스토어 초기값이 25개의 더미 데이터(`seedTodos`)로 설정되어 로그인 여부와 무관하게 모든 사용자에게 동일한 데이터가 표시되었습니다.
+3. **`mergeSeedById`**: persist `merge` 함수가 localStorage를 불러올 때도 항상 `seedTodos`를 다시 주입하여 데이터를 지울 수 없었습니다.
+4. **`SchedulePage` 인증 가드 없음**: 로그인하지 않은 사용자가 캘린더에서 과거 날짜를 클릭해도 로그인 유도 없이 빈 리스트만 표시되었습니다.
+
+### Success Criteria
+
+- 게스트 사용자(비로그인)는 빈 상태로 서비스를 이용하며, 로컬에서 할 일을 자유롭게 작성할 수 있다.
+- 로그인 시 게스트 로컬 데이터가 백엔드 DB로 자동 마이그레이션되고, 이후 화면에는 해당 계정의 백엔드 데이터만 표시된다.
+- 로그아웃 시 로컬 스토어가 완전히 초기화되어 다른 계정의 데이터가 잔류하지 않는다.
+- 페이지 새로고침 시 로그인 상태가 유지된 경우 백엔드에서 데이터를 자동 복구한다.
+- 캘린더에서 과거 날짜를 클릭한 비로그인 사용자에게 로그인 유도 메시지와 버튼을 표시한다.
+- `test@test.com` 계정은 캘린더 스티커 표시(0~5단계)를 위한 시드 데이터를 DB에 보유한다.
+
+### Todo
+
+- [x] `todoStore.ts` 완전 재작성: `seedTodos` 제거, 초기값 빈 배열, version 3으로 기존 localStorage 자동 클리어
+- [x] `todoStore.ts` — `_token` / `setToken()` 추가: 로그인 상태를 스토어 내부에서 관리 (circular import 방지)
+- [x] `todoStore.ts` — `addTodo()` 백엔드 연동: 로그인 시 `POST /tasks` 호출 후 백엔드 ID로 로컬 저장
+- [x] `todoStore.ts` — `toggleDone / archiveTodo / restoreTodo / updateTodo`: 낙관적 로컬 업데이트 + 백엔드 fire-and-forget PATCH
+- [x] `todoStore.ts` — `removeTodo()` + undo 지원: 3.5초 지연 DELETE로 `insertTodo` undo 시 취소 가능
+- [x] `todoStore.ts` — `fetchFromBackend()`: `GET /tasks` + `GET /tasks/archive` 병렬 fetch 후 로컬 상태 교체
+- [x] `todoStore.ts` — `migrateAndFetch()`: 게스트 로컬 todo(비숫자 ID) 업로드 → `fetchFromBackend()` 실행
+- [x] `todoStore.ts` — `clearStore()`: todos / deletedTodos / _token 전체 초기화
+- [x] `authStore.ts` — `login / loginWithToken / linkAccount` 에 `setToken()` 호출 추가
+- [x] `MobileLayout.tsx` — 마운트 시 `useAuthStore.getState()` 확인 후 `setToken + fetchFromBackend` 실행 (새로고침 복구)
+- [x] `SchedulePage.tsx` — 과거 날짜 클릭 시 비로그인 사용자에게 로그인 유도 UI 표시
+- [x] 백엔드 시드 스크립트 (`seed_test_account.py`) 작성 및 실행: `test@test.com`에 25개 태스크 등록
+
+### 변경 파일 목록
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `frontend/src/5todolist/todoStore.ts` | 완전 재작성 — seedTodos 제거, 백엔드 API 연동, migrateAndFetch / clearStore 구현 |
+| `frontend/src/authetication/authStore.ts` | login / loginWithToken / linkAccount에 `setToken()` 호출 추가 |
+| `frontend/src/layouts/MobileLayout.tsx` | 마운트 시 로그인 상태 확인 후 백엔드 데이터 자동 복구 |
+| `frontend/src/5todolist/SchedulePage.tsx` | 과거 날짜 비로그인 접근 시 로그인 유도 UI 추가 |
+| `backend/seed_test_account.py` | test@test.com 시드 데이터 25개 등록 스크립트 |
+
+### 주요 설계 결정
+
+#### `_token` 패턴으로 circular import 방지
+`authStore`가 `todoStore`를 동적 import(`import(...)`)하고, `todoStore`가 `authStore`를 정적 import하면 순환 참조가 발생합니다. 이를 해결하기 위해:
+- `todoStore` 내부에 `_token: string | null` 상태를 추가
+- `authStore`가 로그인 시 `setToken(token)`을 호출하여 토큰을 주입
+- 이후 모든 CRUD 작업은 `get()._token`을 읽어 로그인 여부를 판단
+
+#### 낙관적 업데이트(Optimistic Update) 전략
+`toggle / archive / restore / update / remove` 작업은 로컬 상태를 즉시 변경하여 UI 반응성을 보장하고, 백엔드 API 호출은 fire-and-forget으로 처리합니다.
+
+#### undo DELETE 지원
+`removeTodo`는 백엔드 DELETE를 즉시 실행하지 않고 **3.5초 지연**합니다. 3초 toast 창 내에 `insertTodo`(undo)가 호출되면 `clearTimeout`으로 DELETE를 취소하여 DB 왕복 없이 복구됩니다.
+
+#### ID 체계 구분
+- **숫자 ID** (`"42"` 등): 백엔드에서 생성된 Task — CRUD 시 API 호출
+- **비숫자 ID** (UUID 등): 게스트 로컬 데이터 — `migrateAndFetch` 시 업로드 대상
+
+> **현재 진행 및 구현 여부 가이드**
+> - **작업 시작 유무**: 완료됨
+> - **구현 유무**: **프론트엔드/백엔드 Full Stack 완전 구현 완료**
+> - **사유**: PRO-B-46에서 문서상 완료로 표시되었으나 실제 미구현이었던 백엔드 연동 로직(`migrateAndFetch`, `clearStore`, CRUD API 호출)을 전면 재구현하였습니다. 계정별 데이터 분리, 게스트→로그인 이관, 새로고침 복구, 캘린더 인증 가드, 시드 데이터까지 포함하여 사용자 경험 관점에서 완결된 인증-데이터 연동 플로우를 완성하였습니다.
 
 ---
 

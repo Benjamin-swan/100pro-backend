@@ -11,6 +11,7 @@ from app.domains.task import models, schemas
 from app.domains.auth.security import get_current_user
 from app.domains.auth.models import User
 from app.domains.TodayFocus.today_focus.service import TodayFocusServiceImpl
+from app.infrastructure.task_archive.models import TaskArchive, TaskStatusHistory
 
 router = APIRouter()
 
@@ -135,17 +136,55 @@ def update_task(
         models.Task.id == task_id,
         models.Task.user_id == current_user.id
     ).first()
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    now = datetime.now(timezone.utc)
+    prev_status = task.status.value if isinstance(task.status, models.TaskStatus) else str(task.status)
 
     if task_data.title is not None:
         task.title = task_data.title
     if task_data.description is not None:
         task.description = task_data.description
-    if task_data.status is not None:
+
+    # [PRO-B-23] 상태 변경 시 task_status_history 기록
+    if task_data.status is not None and task.status != task_data.status:
+        new_status_val = task_data.status.value if isinstance(task_data.status, models.TaskStatus) else str(task_data.status)
+        db.add(TaskStatusHistory(
+            task_id=task.id,
+            previous_status=prev_status,
+            new_status=new_status_val,
+            strategy_applied=None,
+            changed_at=now,
+        ))
         task.status = task_data.status
-    if task_data.is_archived is not None:
+
+    # [PRO-B-23] 보관 처리 시 task_archives 스냅샷 + task_status_history 기록
+    if task_data.is_archived is True and not task.is_archived:
+        already_archived = db.query(TaskArchive).filter(
+            TaskArchive.original_task_id == task.id
+        ).first()
+        if not already_archived:
+            db.add(TaskArchive(
+                original_task_id=task.id,
+                title=task.title,
+                description=task.description,
+                original_status=prev_status,
+                user_id=str(task.user_id),
+                due_date=task.due_date,
+                task_created_at=task.created_at,
+                archived_at=now,
+            ))
+        db.add(TaskStatusHistory(
+            task_id=task.id,
+            previous_status=prev_status,
+            new_status="archived",
+            strategy_applied="archive",
+            changed_at=now,
+        ))
+        task.is_archived = True
+    elif task_data.is_archived is not None:
         task.is_archived = task_data.is_archived
 
     db.commit()
@@ -191,9 +230,34 @@ def batch_action_past_tasks(
         return {"message": "No valid tasks found for the operation"}
 
     if action_data.action == "archive":
+        now = datetime.now(timezone.utc)
         for t in tasks:
+            prev_status = t.status.value if isinstance(t.status, models.TaskStatus) else str(t.status)
+            # [PRO-B-23] task_archives 스냅샷 (중복 방지)
+            already_archived = db.query(TaskArchive).filter(
+                TaskArchive.original_task_id == t.id
+            ).first()
+            if not already_archived:
+                db.add(TaskArchive(
+                    original_task_id=t.id,
+                    title=t.title,
+                    description=t.description,
+                    original_status=prev_status,
+                    user_id=str(t.user_id),
+                    due_date=t.due_date,
+                    task_created_at=t.created_at,
+                    archived_at=now,
+                ))
+            # [PRO-B-23] task_status_history 기록
+            db.add(TaskStatusHistory(
+                task_id=t.id,
+                previous_status=prev_status,
+                new_status="archived",
+                strategy_applied="archive",
+                changed_at=now,
+            ))
             t.is_archived = True
-            t.status = models.TaskStatus.PENDING # optional status reset if wanted
+            t.status = models.TaskStatus.PENDING
         db.commit()
         return {"message": f"Archived {len(tasks)} tasks."}
     else:
